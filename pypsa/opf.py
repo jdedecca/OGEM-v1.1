@@ -23,6 +23,7 @@
 from __future__ import division, absolute_import
 from six import iteritems, string_types
 
+
 __author__ = """
 Tom Brown (FIAS), Jonas Hoersch (FIAS), David Schlachtberger (FIAS)
 Joao Gorenstein Dedecca
@@ -230,20 +231,21 @@ def define_storage_variables_constraints(network,snapshots,OGEM_options):
     ## Now define state of charge constraints ##
 
     network.model.state_of_charge = Var(list(network.storage_units.index), snapshots,
-                                        domain=NonNegativeReals, bounds=(0,None))
+                                            domain=NonNegativeReals, bounds=(0,None))
 
-    upper = {(su,sn) : [[(1,model.state_of_charge[su,sn]),
-                         (-sus.at[su,"max_hours"],model.storage_p_nom[su])],"<=",0.]
-             for su in ext_sus_i for sn in snapshots}
-    upper.update({(su,sn) : [[(1,model.state_of_charge[su,sn])],"<=",
-                             sus.at[su,"max_hours"]*sus.at[su,"p_nom"]]
-                  for su in fix_sus_i for sn in snapshots})
-
-    l_constraint(model, "state_of_charge_upper", upper,
-                 list(network.storage_units.index), snapshots)
-
-    # Storage units dispatch and store in expansion cases is fixed, so SOC constraints are not necessary.
     if OGEM_options["reference"] != "expansion":
+        upper = {(su,sn) : [[(1,model.state_of_charge[su,sn]),
+                             (-sus.at[su,"max_hours"],model.storage_p_nom[su])],"<=",0.]
+                 for su in ext_sus_i for sn in snapshots}
+        upper.update({(su,sn) : [[(1,model.state_of_charge[su,sn])],"<=",
+                                 sus.at[su,"max_hours"]*sus.at[su,"p_nom"]]
+                      for su in fix_sus_i for sn in snapshots})
+
+        l_constraint(model, "state_of_charge_upper", upper,
+                     list(network.storage_units.index), snapshots)
+
+        # Storage units dispatch and store in expansion cases is fixed, so SOC constraints are not necessary.
+
         #this builds the constraint previous_soc + p_store - p_dispatch + inflow - spill == soc
         #it is complicated by the fact that sometimes previous_soc and soc are floats, not variables
         soc = {}
@@ -253,12 +255,14 @@ def define_storage_variables_constraints(network,snapshots,OGEM_options):
 
         state_of_charge_set = get_switchable_as_dense(network, 'StorageUnit', 'state_of_charge_set', snapshots)
 
+        # TODO Resolve application of snapshot_weightings to store and dispatch
+
         for su in sus.index:
             for g,sn_group in snapshots.groupby(network.scenarios).items():
                 for i,sn in enumerate(sn_group):
                     soc[su,sn] =  [[],"==",0.]
-
-                    elapsed_hours = network.snapshot_weightings[sn] * 8760 / network.snapshot_weightings.sum()
+                    #TODO Resolve application of snapshot_weightings to store and dispatch
+                    elapsed_hours = network.snapshot_weightings[sn] * len(network.snapshots) / network.snapshot_weightings.sum()
 
                     if i == 0 and not sus.at[su,"cyclic_state_of_charge"]:
                         previous_state_of_charge = sus.at[su,"state_of_charge_initial"]
@@ -569,11 +573,13 @@ def define_passive_branch_flows_with_angles(network, snapshots):
             attribute = "r_pu" if network.sub_networks.at[sub,"carrier"] == "DC" else "x_pu"
             y = 1/(passive_branches.at[branch,attribute]*(passive_branches.at[branch,"tap_ratio"] if bt == "Transformer" else 1.))
 
-            big_M = 3E2 # Standard big_M value. Increase if the KVL duals check accuses a binding flow constraint for a not-invested branch.
+            big_M = 1e2 # Standard big_M value. Increase if the KVL duals check accuses a binding flow constraint for a not-invested branch.
             # Big M optimization.
             if bus0 in min_theta.keys():
                 if bus1 in min_theta[bus0].keys():
                     big_M = min(min_theta[bus0][bus1] * y * 1.05,big_M)
+
+            # TODO graph shortest path to determine big_M by bus pair
 
             for sn in snapshots:
                 lhs = LExpression([(1,network.model.passive_branch_p[bt,bn,sn]),(-y,network.model.voltage_angles[bus0,sn]),
@@ -814,7 +820,8 @@ def define_participation_variables(network, snapshots, base_welfare):
         if (bus0["country"] in countries):
             _country_participation_upper[bus0["country"]].variables.append((-1,network.model.cb_bin_inv[cb]))
         if (bus1["country"] in countries):
-            _country_participation_upper[bus1["country"]].variables.append((-1,network.model.cb_bin_inv[cb]))
+            if bus1["country"] != bus0["country"]:
+                _country_participation_upper[bus1["country"]].variables.append((-1,network.model.cb_bin_inv[cb]))
 
     for pb,branch in cooperative_passive_branches.iterrows():
         bus0 = network.buses.loc[branch["bus0"]]
@@ -822,7 +829,8 @@ def define_participation_variables(network, snapshots, base_welfare):
         if (bus0["country"] in countries):
             _country_participation_upper[bus0["country"]].variables.append((-1,network.model.pb_bin_inv[pb]))
         if (bus1["country"] in countries):
-            _country_participation_upper[bus1["country"]].variables.append((-1,network.model.pb_bin_inv[pb]))
+            if bus1["country"] != bus0["country"]:
+                _country_participation_upper[bus1["country"]].variables.append((-1,network.model.pb_bin_inv[pb]))
 
     # Although the _country_participation_upper and _country_participation_lower are exactly the same, deep copying the former after build is not possible, so they are built separately.
 
@@ -878,12 +886,14 @@ def define_objective(network, snapshots, low_totex_factor, high_totex_factor):
 
     # The capitals cost of extendable generators is a Pyomo parameter.
     # Allows to set them to zero when fixing and re-running the MIP to obtain short-run instead of long-run marginal prices.
-    def gen_capital_cost_rule(model,gen):
-        return extendable_generators.at[gen,"capital_cost"]
+    # def gen_capital_cost_rule(model,gen):
+    #     return extendable_generators.at[gen,"capital_cost"]
 
-    model.gen_capital_cost = Param(list(extendable_generators.index), initialize=gen_capital_cost_rule,mutable=True)
+    #model.gen_capital_cost = Param(list(extendable_generators.index), initialize=gen_capital_cost_rule,mutable=True)
 
     objective = LExpression()
+
+    investment_objective = LExpression()
 
     for sn in snapshots:
         weight = network.snapshot_weightings[sn]
@@ -911,40 +921,54 @@ def define_objective(network, snapshots, low_totex_factor, high_totex_factor):
 
     #NB: for capital costs we subtract the costs of existing infrastructure p_nom/s_nom
     #TODO include generation totex factor for other techs if needed
-    objective.variables.extend([(ext_sus.at[su,"capital_cost"], model.storage_p_nom[su])
+
+    investment_objective.variables.extend([(ext_sus.at[su,"capital_cost"], model.storage_p_nom[su])
                                 for su in ext_sus.index])
-    objective.constant -= (ext_sus.capital_cost * ext_sus.p_nom).sum()
+    investment_objective.constant -= (ext_sus.capital_cost * ext_sus.p_nom).sum()
 
-    objective.variables.extend([(ext_stores.at[store,"capital_cost"], model.store_e_nom[store])
+    investment_objective.variables.extend([(ext_stores.at[store,"capital_cost"], model.store_e_nom[store])
                                 for store in ext_stores.index])
-    objective.constant -= (ext_stores.capital_cost * ext_stores.e_nom).sum()
+    investment_objective.constant -= (ext_stores.capital_cost * ext_stores.e_nom).sum()
 
-    objective.variables.extend([(extendable_passive_branches.at[b, "capital_cost"] * low_totex_factor * extendable_passive_branches.at[b, "s_nom_max"], model.pb_inv_ratio[b]) for b in extendable_passive_branches.index])
-    objective.constant -= (extendable_passive_branches.capital_cost * low_totex_factor * extendable_passive_branches.s_nom).sum()
+    investment_objective.variables.extend([(extendable_passive_branches.at[b, "capital_cost"] * low_totex_factor * extendable_passive_branches.at[b, "s_nom_max"], model.pb_inv_ratio[b]) for b in extendable_passive_branches.index])
+    investment_objective.constant -= (extendable_passive_branches.capital_cost * low_totex_factor * extendable_passive_branches.s_nom).sum()
 
-    objective.variables.extend([(extendable_ptp_links.at[b, "capital_cost"] * low_totex_factor * extendable_ptp_links.at[b, "p_nom_max"], model.cb_inv_ratio[b]) for b in extendable_ptp_links.index])
-    objective.constant -= (extendable_ptp_links.capital_cost * low_totex_factor * extendable_ptp_links.p_nom).sum()
+    investment_objective.variables.extend([(extendable_ptp_links.at[b, "capital_cost"] * low_totex_factor * extendable_ptp_links.at[b, "p_nom_max"], model.cb_inv_ratio[b]) for b in extendable_ptp_links.index])
+    investment_objective.constant -= (extendable_ptp_links.capital_cost * low_totex_factor * extendable_ptp_links.p_nom).sum()
 
-    objective.variables.extend([(extendable_converters.at[b,"capital_cost"] * low_totex_factor, model.conv_p_nom[b])
+    investment_objective.variables.extend([(extendable_converters.at[b,"capital_cost"] * low_totex_factor, model.conv_p_nom[b])
                                 for b in extendable_converters.index])
-    objective.constant -= (extendable_converters.capital_cost * low_totex_factor * extendable_converters.p_nom).sum()
+    investment_objective.constant -= (extendable_converters.capital_cost * low_totex_factor * extendable_converters.p_nom).sum()
 
-    #TODO reformulate with capital cost parameters
-    #WARNINIG Objective function value will be incorrect when capital cost parameters are set to zero.
-    objective.constant -= (extendable_generators.capital_cost * high_totex_factor * extendable_generators.p_nom).sum()
+    investment_objective.variables.extend([(extendable_generators.at[gen,'capital_cost'] * high_totex_factor,model.generator_p_nom[gen])
+                                            for gen in extendable_generators.index])
+    investment_objective.constant -= (extendable_generators.capital_cost * high_totex_factor * extendable_generators.p_nom).sum()
+
+    objective = objective + investment_objective
 
     l_objective(model,objective)
 
+    def l_expression(model, expression):
+
+        # initialise with a dummy
+        model.investment_objective = Expression(expr=0.)
+
+        model.investment_objective._expr = pyomo.core.base.expr_coopr3._SumExpression()
+        model.investment_objective._expr._args = [item[1] for item in expression.variables]
+        model.investment_objective._expr._coef = [item[0] for item in expression.variables]
+        model.investment_objective._expr._const = expression.constant
+
+    l_expression(model,investment_objective)
+    
     #TODO include storage capital costs if there is endogenous storage investment
     # Create generator investment cost expression, add to objective and replace old objective.
-    model.comp_obj = Expression(expr=sum(model.gen_capital_cost[gen] * high_totex_factor * model.generator_p_nom[gen]
-                                         for gen in extendable_generators.index))
-
-    model.new_obj = (model.objective.expr + model.comp_obj.expr)
-
-    model.del_component("objective")
-
-    model.objective = Objective(expr = model.new_obj)
+    #model.comp_obj = Expression(expr=sum(model.gen_capital_cost[gen] * high_totex_factor * model.generator_p_nom[gen]
+    #                                     for gen in extendable_generators.index))
+    #model.new_obj = (model.objective.expr + model.comp_obj.expr)
+    #model.del_component("objective")
+    #model.objective = Objective(expr = model.new_obj)
+    #model.del_component("new_obj")
+    #model.del_component("comp_obj")
 
 def define_absolute_flows(network, snapshots):
     """ Create variables of absolute flows of branches.
@@ -978,7 +1002,7 @@ def define_absolute_flows(network, snapshots):
 
     network.model.abs_passive_negative = Constraint(list(network.model.abs_passive_branch_p._index),rule=abs_passive_negative)
 
-def define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, high_totex_factor):
+def define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, high_totex_factor, pareto_tolerance):
     """ Pareto welfare constraints for each country.
         A country welfare must increase compared to the base case.
 
@@ -1011,10 +1035,24 @@ def define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, hi
 
     countries = list(model.country_participation._index)
 
-    # The actual big_M value is set in the main Pareto welfare loop.
+    # Creates the Pareto welfare big M parameter. The actual value is set in the main Pareto welfare loop.
     model.welfare_big_M = Param(countries,mutable=True,default=0)
 
-    def country_pareto_welfare(model, country):
+    """
+    Implements a variable for each welfare components with a constraint variable = expression
+    + consumer payments
+    + producer surplus
+    + storage unit surplus
+    + passive branch congestion rent
+    + point-to-point link congestion rent
+    + converter congestion rent
+    - investment costs
+    + big M * (1 - country participation)
+    - base welfare
+    >= 0
+     """
+
+    def CP_rule(model, country):
         # Define all components belonging to the country.
         country_buses = network.buses[network.buses["country"] == country].index
         country_loads = network.loads[network.loads["bus"].isin(country_buses)].index
@@ -1027,41 +1065,167 @@ def define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, hi
         country_convs = converters[converters["bus0"].isin(country_buses)]
 
         # Build expressions for each welfare change component.
-        con_payments = sum(network.loads_t.p.loc[sn, load] * model.marginal_prices[(load,sn)] * weights[sn] for sn in snapshots for load in country_loads)
-        gen_surplus = sum(model.generator_p[(g, sn)] * model.gen_margins[(g,sn)] * weights[sn] for g,gen in country_gens.iterrows() for sn in snapshots)
-        su_surplus = sum(model.storage_p_dispatch[(s, sn)] * model.su_margins[(s,sn)] * weights[sn] for s,su in country_sus.iterrows() for sn in snapshots)
-        su_deficit = sum(model.storage_p_store[(s, sn)] * model.marginal_prices[(su['bus'], sn)] * weights[sn] for s,su in country_sus.iterrows() for sn in snapshots)
-        line_cr = sum(network.model.passive_branch_p[bt,bn,sn] * model.pb_margins[(bn,sn)] * weights[sn] / 2 for (bt,bn), branch in country_lines0.iterrows() for sn in snapshots)
-        line_cr += sum(network.model.passive_branch_p[bt,bn,sn] * model.pb_margins[(bn,sn)] * weights[sn] / 2 for (bt,bn), branch in country_lines1.iterrows() for sn in snapshots)
-        link_cr = sum(network.model.link_p[l,sn] * model.cb_margins[(l,sn)] * weights[sn] / 2 for l, link in country_links0.iterrows() for sn in snapshots)
-        link_cr += sum(network.model.link_p[l,sn] * model.cb_margins[(l,sn)] * weights[sn] / 2 for l, link in country_links1.iterrows() for sn in snapshots)
-        conv_cr = sum(network.model.link_p[c,sn] * model.cb_margins[(c,sn)] * weights[sn] for c, conv in country_convs.iterrows() for sn in snapshots)
+        return sum(network.loads_t.p.loc[sn, load] * model.marginal_prices[(load,sn)] for sn in snapshots for load in country_loads)
 
-        gen_investment = sum(gen["capital_cost"] * high_totex_factor * (network.model.generator_p_nom[g] - gen['p_nom']) for g, gen in country_gens[country_gens.p_nom_extendable].iterrows())
-        line_investment = sum(branch["capital_cost"] * branch["s_nom_max"] * network.model.pb_inv_ratio[b] * low_totex_factor / 2 for b, branch in country_lines0[country_lines0.s_nom_extendable].iterrows())
-        line_investment += sum(branch["capital_cost"] * branch["s_nom_max"] * network.model.pb_inv_ratio[b] * low_totex_factor / 2 for b, branch in country_lines1[country_lines1.s_nom_extendable].iterrows())
-        link_investment = sum(link["capital_cost"] * link["p_nom_max"] * network.model.cb_inv_ratio[l] * low_totex_factor / 2 for l, link in country_links0[country_links0.p_nom_extendable].iterrows())
-        link_investment += sum(link["capital_cost"] * link["p_nom_max"] * network.model.cb_inv_ratio[l] * low_totex_factor / 2 for l, link in country_links1[country_links1.p_nom_extendable].iterrows())
-        conv_investment = sum(conv["capital_cost"] * low_totex_factor * (network.model.conv_p_nom[c] - conv['p_nom']) for c, conv in country_convs[country_convs.p_nom_extendable].iterrows())
+    def CP_constraint(model, country):
+        return  model.consumer_payments_e[country] - model.consumer_payments[country] == 0
 
-        constant = base_welfare.loc[country] * hours - model.welfare_big_M[country]
-        welfare_expr = - con_payments\
-                       + gen_surplus\
-                       + su_surplus\
-                       - su_deficit\
-                       + line_cr\
-                       + link_cr\
-                       + conv_cr\
-                       - gen_investment\
-                       - line_investment\
-                       - link_investment\
-                       - conv_investment\
-                       - model.welfare_big_M[country] * model.country_participation[country]\
-                       - constant
+    model.consumer_payments_e = Expression(countries, rule=CP_rule)
 
-        return welfare_expr / model.welfare_big_M_scale.value / hours >= 0
+    model.consumer_payments = Var(countries, domain = Reals, initialize = CP_rule)
 
-    model.pareto_welfare = Constraint(countries, rule=country_pareto_welfare)
+    model.consumer_payments_c = Constraint(countries, rule=CP_constraint)
+
+
+
+    def PS_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_gens = network.generators[network.generators["bus"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return sum(model.generator_p[(g, sn)] * model.gen_margins[(g,sn)] for g,gen in country_gens.iterrows() for sn in snapshots)
+
+    def PS_constraint(model, country):
+        return  model.producer_surplus_e[country] - model.producer_surplus[country] == 0
+
+    model.producer_surplus = Var(countries, domain = Reals, initialize = PS_rule)
+
+    model.producer_surplus_e = Expression(countries, rule=PS_rule)
+
+    model.producer_surplus_c = Constraint(countries, rule=PS_constraint)
+    
+    
+    
+    def SS_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_sus = network.storage_units[network.storage_units["bus"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return sum(model.storage_p_dispatch[(s, sn)] * model.su_margins[(s,sn)] for s,su in country_sus.iterrows() for sn in snapshots) + sum(model.storage_p_store[(s, sn)] * model.marginal_prices[(su['bus'], sn)] for s,su in country_sus.iterrows() for sn in snapshots)
+
+    def SS_constraint(model, country):
+        return  model.storage_surplus_e[country] - model.storage_surplus[country] == 0
+
+    model.storage_surplus_e = Expression(countries, rule=SS_rule)
+
+    model.storage_surplus = Var(countries, domain = Reals, initialize = SS_rule)
+
+    model.storage_surplus_c = Constraint(countries, rule=SS_constraint)
+    
+    
+    
+    def PBR_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_lines0 = passive_branches[passive_branches["bus0"].isin(country_buses)]
+        country_lines1 = passive_branches[passive_branches["bus1"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return sum(network.model.passive_branch_p[bt,bn,sn] * model.pb_margins[(bn,sn)] / 2 for (bt,bn), branch in country_lines0.iterrows() for sn in snapshots) + sum(network.model.passive_branch_p[bt,bn,sn] * model.pb_margins[(bn,sn)] / 2 for (bt,bn), branch in country_lines1.iterrows() for sn in snapshots)
+
+    def PBR_constraint(model, country):
+        return  model.pb_rent_e[country] - model.pb_rent[country] == 0
+
+    model.pb_rent_e = Expression(countries, rule=PBR_rule)
+
+    model.pb_rent = Var(countries, domain = Reals, initialize = PBR_rule)
+
+    model.pb_rent_c = Constraint(countries, rule=PBR_constraint)
+
+
+    def PTPR_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_links0 = ptp_links[ptp_links["bus0"].isin(country_buses)]
+        country_links1 = ptp_links[ptp_links["bus1"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return sum(network.model.link_p[l,sn] * model.cb_margins[(l,sn)] / 2 for l, link in country_links0.iterrows() for sn in snapshots) + sum(network.model.link_p[l,sn] * model.cb_margins[(l,sn)] / 2 for l, link in country_links1.iterrows() for sn in snapshots)
+
+    def PTPR_constraint(model, country):
+        return  model.ptp_rent_e[country] - model.ptp_rent[country] == 0
+
+    model.ptp_rent_e = Expression(countries, rule=PTPR_rule)
+
+    model.ptp_rent = Var(countries, domain = Reals, initialize = PTPR_rule)
+
+    model.ptp_rent_c = Constraint(countries, rule=PTPR_constraint)
+
+
+
+    def CR_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_convs = converters[converters["bus0"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return sum(network.model.link_p[c,sn] * model.cb_margins[(c,sn)] for c, conv in country_convs.iterrows() for sn in snapshots)
+
+    def CR_constraint(model, country):
+        return  model.conv_rent_e[country] - model.conv_rent[country] == 0
+
+    model.conv_rent_e = Expression(countries, rule=CR_rule)
+
+    model.conv_rent = Var(countries, domain = Reals, initialize = CR_rule)
+
+    model.conv_rent_c = Constraint(countries, rule=CR_constraint)
+
+
+    def IC_rule(model, country):
+        # Define all components belonging to the country.
+        country_buses = network.buses[network.buses["country"] == country].index
+        country_gens = network.generators[network.generators["bus"].isin(country_buses)]
+        country_sus = network.storage_units[network.storage_units["bus"].isin(country_buses)]
+        country_lines0 = passive_branches[passive_branches["bus0"].isin(country_buses)]
+        country_lines1 = passive_branches[passive_branches["bus1"].isin(country_buses)]
+        country_links0 = ptp_links[ptp_links["bus0"].isin(country_buses)]
+        country_links1 = ptp_links[ptp_links["bus1"].isin(country_buses)]
+        country_convs = converters[converters["bus0"].isin(country_buses)]
+
+        # Build expressions for each welfare change component.
+        return  + sum(gen["capital_cost"] * high_totex_factor * (network.model.generator_p_nom[g] - gen['p_nom']) for g, gen in country_gens[country_gens.p_nom_extendable].iterrows())\
+                + sum(branch["capital_cost"] * branch["s_nom_max"] * network.model.pb_inv_ratio[b] * low_totex_factor / 2 for b, branch in country_lines0[country_lines0.s_nom_extendable].iterrows())\
+                + sum(branch["capital_cost"] * branch["s_nom_max"] * network.model.pb_inv_ratio[b] * low_totex_factor / 2 for b, branch in country_lines1[country_lines1.s_nom_extendable].iterrows())\
+                + sum(link["capital_cost"] * link["p_nom_max"] * network.model.cb_inv_ratio[l] * low_totex_factor / 2 for l, link in country_links0[country_links0.p_nom_extendable].iterrows())\
+                + sum(link["capital_cost"] * link["p_nom_max"] * network.model.cb_inv_ratio[l] * low_totex_factor / 2 for l, link in country_links1[country_links1.p_nom_extendable].iterrows())\
+                + sum(conv["capital_cost"] * low_totex_factor * (network.model.conv_p_nom[c] - conv['p_nom']) for c, conv in country_convs[country_convs.p_nom_extendable].iterrows())
+
+    def IC_constraint(model, country):
+        return  model.investment_cost_e[country] - model.investment_cost[country] == 0
+
+    model.investment_cost_e = Expression(countries, rule=IC_rule)
+
+    model.investment_cost = Var(countries, domain = Reals, initialize = IC_rule)
+
+    model.investment_cost_c = Constraint(countries, rule=IC_constraint)
+    
+    
+    def welfare_constant_rule(model, country):
+
+        # Build expressions for each welfare change component.
+
+        if base_welfare.loc[country] < 0:
+            pareto_sign = - 1
+        else:
+            pareto_sign = + 1
+        welfare_constant = base_welfare.loc[country] * hours * (1. - pareto_sign * pareto_tolerance) - model.welfare_big_M[country]
+        return  welfare_constant
+
+    def welfare_constant_constraint(model, country):
+        return  model.welfare_constant_e[country] - model.welfare_constant[country] == 0
+
+    model.welfare_constant_e = Expression(countries, rule=welfare_constant_rule)
+
+    model.welfare_constant = Var(countries, domain = Reals, initialize = welfare_constant_rule)
+
+    model.welfare_constant_c = Constraint(countries, rule=welfare_constant_constraint)
+
+    def final_welfare(model,country):
+        return - model.consumer_payments[country] + model.producer_surplus[country] + model.storage_surplus[country] + model.pb_rent[country] + model.ptp_rent[country] + model.conv_rent[country] - model.investment_cost[country] - model.welfare_big_M[country] * model.country_participation[country] - model.welfare_constant[country] >= 0
+
+    model.pareto_welfare = Constraint(countries, rule=final_welfare)
 
 def define_cooperation_constraint(network,cooperation_limit):
     """ Applicable when there is a cooperation limit.
@@ -1070,26 +1234,26 @@ def define_cooperation_constraint(network,cooperation_limit):
     cooperative_ptp_links = network.links[network.links.p_nom_extendable & network.links.cooperative & (network.links.branch_type == "ptp")]
     passive_branches = network.passive_branches()
     cooperative_passive_branches = passive_branches[passive_branches.s_nom_extendable & passive_branches.cooperative]
-    offshore_buses_i = network.buses[network.buses.terminal_type.isin(["owf","hub"])].index
+    offshore_buses_i = network.buses.loc[network.buses.terminal_type.isin(["owf","hub"]),'base_bus'].unique()
 
     _cooperation_constraint = {(bus) : LExpression()
                           for bus in offshore_buses_i}
 
     for cb,branch in cooperative_ptp_links.iterrows():
-        bus0 = network.buses.loc[branch["bus0"]]
-        bus1 = network.buses.loc[branch["bus1"]]
-        if branch["bus0"] in offshore_buses_i:
-            _cooperation_constraint[branch["bus0"]].variables.append((1,network.model.cb_bin_inv[cb]))
-        if branch["bus1"] in offshore_buses_i:
-            _cooperation_constraint[branch["bus1"]].variables.append((1,network.model.cb_bin_inv[cb]))
+        base_bus0 = network.buses.loc[branch["bus0"],'base_bus']
+        base_bus1 = network.buses.loc[branch["bus1"],'base_bus']
+        if base_bus0 in offshore_buses_i:
+            _cooperation_constraint[base_bus0].variables.append((1,network.model.cb_bin_inv[cb]))
+        if base_bus1 in offshore_buses_i:
+            _cooperation_constraint[base_bus1].variables.append((1,network.model.cb_bin_inv[cb]))
 
     for pb,branch in cooperative_passive_branches.iterrows():
-        bus0 = network.buses.loc[branch["bus0"]]
-        bus1 = network.buses.loc[branch["bus1"]]
-        if branch["bus0"] in offshore_buses_i:
-            _cooperation_constraint[branch["bus0"]].variables.append((1,network.model.pb_bin_inv[pb]))
-        if branch["bus1"] in offshore_buses_i:
-            _cooperation_constraint[branch["bus1"]].variables.append((1,network.model.pb_bin_inv[pb]))
+        base_bus0 = network.buses.loc[branch["bus0"],'base_bus']
+        base_bus1 = network.buses.loc[branch["bus1"],'base_bus']
+        if base_bus0 in offshore_buses_i:
+            _cooperation_constraint[base_bus0].variables.append((1,network.model.pb_bin_inv[pb]))
+        if base_bus1 in offshore_buses_i:
+            _cooperation_constraint[base_bus1].variables.append((1,network.model.pb_bin_inv[pb]))
 
     cooperation_constraint = {k: LConstraint(v, "<=", LExpression(constant=cooperation_limit)) for k, v in iteritems(_cooperation_constraint)}
 
@@ -1115,7 +1279,7 @@ def fix_constrained_units(network, snapshots):
             network.model.generator_p[g, sn].value = network.generators_t.p_set.loc[sn, g]
             network.model.generator_p[g, sn].fixed = True
 
-def extract_optimisation_results(network, snapshots, formulation="angles"):
+def extract_optimisation_results(network, snapshots,reference,formulation="angles"):
 
     from .components import \
         passive_branch_components, branch_components, controllable_one_port_components
@@ -1134,7 +1298,8 @@ def extract_optimisation_results(network, snapshots, formulation="angles"):
                                          'Link': ['p0', 'p1']})
 
     #get value of objective function
-    network.objective = network.results["Problem"][0]["Lower bound"]
+    network.objective = value(network.model.objective)
+    print("Objective:",network.objective)
 
     model = network.model
 
@@ -1151,6 +1316,9 @@ def extract_optimisation_results(network, snapshots, formulation="angles"):
         set_from_series(network.storage_units_t.p,
                         as_series(model.storage_p_dispatch)
                         - as_series(model.storage_p_store))
+
+        as_series(model.storage_p_dispatch).to_csv('storage_p_dispatch.csv')
+        as_series(model.storage_p_store).to_csv('storage_p_store.csv')
 
         set_from_series(network.storage_units_t.state_of_charge,
                         as_series(model.state_of_charge))
@@ -1253,8 +1421,6 @@ def extract_optimisation_results(network, snapshots, formulation="angles"):
         if c.df.s_nom_extendable.any():
             c.df.loc[c.df.s_nom_extendable, 's_nom_opt'] = s_nom_extendable_passive_branches.loc[c.name]
 
-
-
     network.links.p_nom_opt = network.links.p_nom
 
     extendable_ptp_links_i = network.links[network.links.p_nom_extendable & (network.links.branch_type == "ptp")].index
@@ -1273,6 +1439,12 @@ def extract_optimisation_results(network, snapshots, formulation="angles"):
         except (AttributeError, KeyError) as e:
             logger.warning("Could not read out co2_price, although a co2_limit was set")
 
+
+def memory_usage(step):
+
+    gc.collect()
+    process = psutil.Process(os.getpid())
+    print('{:s} memory usage: {:.2f}'.format(step,process.memory_info().rss / float(2 ** 20)))
 
 def network_lopf(network, snapshots=None, solver_name="glpk",
                  skip_pre=False, extra_functionality=None, solver_options={},
@@ -1324,15 +1496,23 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
     None
     """
 
+    memory_usage('Start')
     print("MILP OPF build at {:%H:%M}...".format(datetime.datetime.now()))
     # Variables declaration
     warmstart = False
-    numerical_precision = 1E-6 # Differentiates residual from significant values.
-    transfer_increase = 1E-4 # For marginal increases in transfer capacities
-    decimal_digits = 3 # To round-off numbers to improve numerical properties of problem.
-    integrality_start = 0.5 # Starting integrality tolerance to provide warmstart to mixed-integer problems.
-    low_totex_factor = (np.pmt(parameters["discount_rate"], parameters["high_lifetime"], -1) + parameters['low_OPEX_%']) / 8760 * parameters['snapshot_scale'] # Factor to calculate investment hourly payments for transmission.
-    high_totex_factor = (np.pmt(parameters["discount_rate"], parameters["low_lifetime"], -1) + parameters['high_OPEX_%']) / 8760 * parameters['snapshot_scale'] # Factor to calculate investment hourly payments for generation.
+    numerical_precision = 1E-5 # Differentiates residual from significant values.
+    transfer_increase = 1e-3 # For marginal increases in transfer capacities
+    decimal_digits = 5 # To round-off numbers to improve numerical properties of problem.
+
+    # The snapshot scale may improve the numerical properties of the problem. Default = 1.
+    if OGEM_options["reference"] != "expansion":
+        snapshot_scale = parameters['MILP_snapshot_scale']
+    else:
+        snapshot_scale = parameters['snapshot_scale']
+
+    # The low and high totex factor transform the CAPEX and OPEX (maintenance) costs to hourly values
+    low_totex_factor = (np.pmt(parameters["discount_rate"], parameters["high_lifetime"], -1) + parameters['low_OPEX_%']) / 8760 * snapshot_scale # Factor to calculate investment hourly payments for transmission.
+    high_totex_factor = (np.pmt(parameters["discount_rate"], parameters["low_lifetime"], -1) + parameters['high_OPEX_%']) / 8760 * snapshot_scale # Factor to calculate investment hourly payments for generation.
 
     if not skip_pre:
         network.determine_network_topology()
@@ -1399,7 +1579,7 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
     logger.info("Solving model using %s", solver_name)
 
-    opt = SolverFactory(solver_name) #solver_io='python'
+    opt = SolverFactory(solver_name) #
 
     patch_optsolver_record_memusage_before_solving(opt, network)
 
@@ -1411,18 +1591,15 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
         if status == "ok" and termination_condition == "optimal":
             logger.info("Optimization successful")
-            extract_optimisation_results(network, snapshots, formulation)
-        elif status == "warning" and termination_condition == "other":
-            logger.warn("WARNING! Optimization might be sub-optimal. Writing output anyway")
-            extract_optimisation_results(network, snapshots, formulation)
+            extract_optimisation_results(network, snapshots,OGEM_options["reference"], formulation)
         else:
-            logger.error("Optimisation failed with status %s and terminal condition %s"
+            logger.error("Optimisation failed with status %s and terminal condition %s. Resolving with symbolic labels."
                          % (status, termination_condition))
 
             # If there is an error, re-run keeping files and using symbolic variable names for debugging.
             solver_run(keepfiles=True, symbolic=True)
 
-            extract_optimisation_results(network, snapshots, formulation)
+            extract_optimisation_results(network, snapshots,OGEM_options["reference"], formulation)
 
     def fix_variables(status=False):
         """ Fix integer variables to obtain marginal prices or unfix problems for run iterations in MILPs """
@@ -1435,23 +1612,34 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
             network.model.pb_bin_inv[epb].fixed = status
             network.model.pb_inv_ratio[epb].fixed = status
             # Slightly increase transfer capacities to eliminate congestion and harmonize marginal prices.
-            if status:
-                if network.model.pb_bin_inv[epb].value == 1:
-                    network.model.pb_inv_ratio[epb].value = min(network.model.pb_inv_ratio[epb].value * (1 + transfer_increase), 1.0)
+            if False:
+                if status:
+                    if network.model.pb_bin_inv[epb].value == 1:
+                        network.model.pb_inv_ratio[epb].value = min(network.model.pb_inv_ratio[epb].value * (1 + transfer_increase), 1.0)
 
         for ecb in network.links.index[network.links.p_nom_extendable & (network.links.branch_type == "ptp")]:
             network.model.cb_bin_inv[ecb].fixed = status
             network.model.cb_inv_ratio[ecb].fixed = status
             # Slightly increase transfer capacities to eliminate congestion and harmonize marginal prices.
-            if status:
-                if network.model.cb_bin_inv[ecb].value == 1:
-                    network.model.cb_inv_ratio[ecb].value = min(network.model.cb_inv_ratio[ecb].value * (1 + transfer_increase), 1.0)
+            if False:
+                if status:
+                    if network.model.cb_bin_inv[ecb].value == 1:
+                        network.model.cb_inv_ratio[ecb].value = min(network.model.cb_inv_ratio[ecb].value * (1 + transfer_increase), 1.0)
+
+        for ecb in network.links.index[network.links.p_nom_extendable & (network.links.branch_type == "ptp")]:
+            network.model.cb_bin_inv[ecb].fixed = status
+            network.model.cb_inv_ratio[ecb].fixed = status
+            # Slightly increase transfer capacities to eliminate congestion and harmonize marginal prices.
+            if False:
+                if status:
+                    if network.model.cb_bin_inv[ecb].value == 1:
+                        network.model.cb_inv_ratio[ecb].value = min(network.model.cb_inv_ratio[ecb].value * (1 + transfer_increase), 1.0)
 
         # Fix all extendable generators to fix solution.
         for gen in network.generators[network.generators.p_nom_extendable].index:
             # WARNING Disabling fixing of generators affects marginal costs
             network.model.generator_p_nom[gen].fixed = status
-            network.model.gen_capital_cost[gen] = network.generators.loc[gen, "capital_cost"] * (not status)
+            #network.model.gen_capital_cost[gen] = network.generators.loc[gen, "capital_cost"] * (not status)
 
         # country_participation is integer and needs to be fixed.
         if hasattr(network.model, "country_participation"):
@@ -1465,13 +1653,54 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
                 for sn in snapshots:
                     if abs(network.model.generator_p[(gen, sn)].value) <= numerical_precision:
                         network.model.generator_p[(gen, sn)].fixed = status
-                        network.model.generator_p[(gen, sn)].value = 0
+                        #network.model.generator_p[(gen, sn)].value = 0
         else:
             for gen in network.generators.index.difference(network.generators_t.p_set.columns):
                 for sn in snapshots:
                     network.model.generator_p[(gen, sn)].fixed = status
 
         network.model.preprocess()
+
+        if status:
+            print('Operation objective:',value(network.model.objective)-value(network.model.investment_objective))
+
+    def fix_load_curtailment():
+        """ Fix the  load curtailment to avoid propagation of VOLL to other buses due to numerical tolerances"""
+
+        # Clear the problem solution before the rerun to reduce memory usage
+        if OGEM_options["reference"] == 'base':
+            network.model.clear_suffix_value('dual')
+            for comp in network.model.component_map():
+                #if comp not in ['passive_branch_p','link_p']:
+                data = getattr(network.model, comp)
+                if data.type() in [Var]:
+                    for it in data:
+                        data[it].value = None
+            network.model.solutions.clear(True)
+            network.results.clear()
+
+        # Fix and set the load curtailment values with some margin for convergence
+        for gen in network.generators[network.generators.carrier == 'Slack'].index:
+            for sn in network.snapshots:
+                network.model.generator_p[(gen, sn)].fixed = True
+                network.model.generator_p[(gen, sn)].value = network.generators_t.p.loc[sn, gen] * 1.01
+
+        network.model.preprocess()
+
+        solver_run()
+        convergence_status()
+        # Unfix load curtailment
+        for gen in network.generators[network.generators.carrier == 'Slack'].index:
+            for sn in network.snapshots:
+                network.model.generator_p[(gen, sn)].fixed = False
+
+        # Manually set nodal prices to VOLL at buses and snapshot with load curtailment
+        slack_prices = (network.generators_t.p.loc[:, network.generators.carrier == 'Slack'] > 1e-4)
+        network.generators.loc[network.generators.carrier == 'Slack', 'marginal_cost'] = 0
+        network.generators.loc[slack_prices.columns[slack_prices.any()],'marginal_cost'] = parameters['VOLL']
+        slack_prices.columns = network.generators.bus[slack_prices.columns]
+        slack_prices = slack_prices.mul(parameters['VOLL'] * network.snapshot_weightings, axis=0)
+        network.buses_t.marginal_price.update(slack_prices.where(slack_prices > 0, network.buses_t.marginal_price))
 
     # Choose symbolic labels for debugging.
     if OGEM_options["reference"] == "expansion":
@@ -1485,20 +1714,19 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
     def solver_run(keepfiles=keep_files, symbolic = symbolic_labels):
         """ Solver run function since solver is called multiple times """
 
-        gc.collect()
-        process = psutil.Process(os.getpid())
-        print('Pre-solver run memory usage:{:.2f}'.format(process.memory_info().rss / float(2 ** 20)))
+        memory_usage('Pre-solver')
+        print(solver_options)
 
         if 'pypsa' in free_memory:
             with empty_network(network):
-                network.results = opt.solve(network.model, suffixes=["dual"],
-                                            keepfiles=keepfiles, options=solver_options, warmstart=warmstart,tee=True,symbolic_solver_labels = symbolic)
+                network.results = opt.solve(network.model, suffixes=["dual"],keepfiles=keepfiles, options=solver_options, warmstart=warmstart,tee=True,symbolic_solver_labels = symbolic)
         else:
-            network.results = opt.solve(network.model, suffixes=["dual"],
-                                        keepfiles=keepfiles, options=solver_options, warmstart=warmstart,tee=True,symbolic_solver_labels = symbolic)
+            network.results = opt.solve(network.model, suffixes=["dual"],keepfiles=keepfiles, options=solver_options, warmstart=warmstart,tee=True,symbolic_solver_labels = symbolic)
+        memory_usage('Post-solver')
+
         print("Solver finished at {:%H:%M}.".format(datetime.datetime.now()))
 
-    def model_run():
+    def model_run(run_fixed = True):
 
         def KVL_duals_check():
             """ Since the disjunctive branch flow constraints big_M may be too small, check ex-post the duals of the inactive branches for any non-null values """
@@ -1524,31 +1752,97 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
         convergence_status()
 
+        network.MILP_objective = network.objective
+
+        duals = pd.Series(list(network.model.passive_fixed_branch_p_def.values()),
+                         index=pd.MultiIndex.from_tuples(list(network.model.passive_fixed_branch_p_def.keys()))).map(
+            pd.Series(list(network.model.dual.values()), index=pd.Index(list(network.model.dual.keys())))).fillna(0).abs()
+
+        network.lines.loc[:,'dual_mean'] = (duals > (0.01 * duals.max())).mean(level=1)
+
+        if OGEM_options["reference"] != "expansion":
+            fix_load_curtailment()
+
         if logger.level > 0:
             network.results.write()
 
         # Fix integer and other variables to obtain marginal prices
         if OGEM_options["reference"] == "expansion":
-
-            print("Fixed model run at {:%H:%M}...".format(datetime.datetime.now()))
-
             KVL_duals_check()
 
-            fix_variables(True)
+            if run_fixed:
 
-            solver_run()
+                print("Fixed model run at {:%H:%M}...".format(datetime.datetime.now()))
 
-            convergence_status()
+                nonlocal warmstart
 
-            KVL_duals_check() # Check if passive branches disjunctive flow constraints' big_M is too small
+                warmstart = False
+
+                fix_variables(True)
+
+                fix_load_curtailment()
 
         print("Run finished at {:%H:%M}. Duration: {}.".format(datetime.datetime.now(),datetime.datetime.now() - starttime))
+
+    def clear_solution():
+        """ After the warmstart, define values for integer variables for warm start and clear values for continuous variables to guarantee a feasible warm start """
+        print('Clearing solution for MIP warm start...')
+        threshold = 0.1
+        for v in network.model.pb_bin_inv:
+            network.model.pb_bin_inv[v].value = (network.model.pb_bin_inv[v].value >= threshold) * 1.
+            if network.model.pb_bin_inv[v].value < 1.:
+                network.model.pb_inv_ratio[v].value = 0
+            else:
+                network.model.pb_inv_ratio[v].value = max(network.model.pb_inv_ratio[v].value,network.lines.loc[v[1], 's_nom_min']/network.lines.loc[v[1], 's_nom_max'])
+
+        for v in network.model.cb_bin_inv:
+            network.model.cb_bin_inv[v].value = (network.model.cb_bin_inv[v].value >= threshold) * 1.
+            if network.model.cb_bin_inv[v].value < 1.:
+                network.model.cb_inv_ratio[v].value = 0
+            else:
+                network.model.cb_inv_ratio[v].value = max(network.model.cb_inv_ratio[v].value,network.links.loc[v, 'p_nom_min']/network.links.loc[v, 'p_nom_max'])
+
+        for v in network.model.conv_p_nom:
+            network.model.conv_p_nom[v].value = None
+
+        for v in network.model.generator_p_nom:
+            network.model.generator_p_nom[v].value = None
+
+        for v in network.model.country_participation:
+            network.model.country_participation[v].value = None
+
+        for v in network.model.passive_branch_p:
+            network.model.passive_branch_p[v].value = None
+
+        for v in network.model.abs_passive_branch_p:
+            network.model.abs_passive_branch_p[v].value = None
+
+        for v in network.model.voltage_angles:
+            network.model.voltage_angles[v].value = None
+
+        for v in network.model.link_p:
+            network.model.link_p[v].value = None
+
+        for v in network.model.abs_link_p:
+            network.model.abs_link_p[v].value = None
+
+        for v in network.model.voltage_angles:
+            network.model.voltage_angles[v].value = None
+
+        for v in network.model.generator_p:
+            if network.model.generator_p[v].fixed == False:
+                network.model.generator_p[v].value = None
+
+        for v in network.model.state_of_charge:
+            network.model.state_of_charge[v].value = None
+
+
 
     if isinstance(free_memory, string_types):
         free_memory = {free_memory}
 
     if 'pyomo_hack' in free_memory:
-        patch_optsolver_free_network_before_solving(opt, network.model)
+        patch_optsolver_free_model_before_solving(opt, network.model)
 
     if OGEM_options["reference"] == "expansion":
 
@@ -1560,13 +1854,29 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
             define_minimum_ratio(network) # Establish minimum investment ratio for branches where p_nom_min/s_nom_min > 0
 
     # Solve problem with high integrality tolerance to provide warmstart
+    def MIP_warmstart():
+        # Relaxes integer variables for warmstart, except the country_participation variable
+
+        for v in network.model.pb_bin_inv:
+            network.model.pb_bin_inv[v].domain = NonNegativeReals
+
+        for v in network.model.cb_bin_inv:
+            network.model.cb_bin_inv[v].domain = NonNegativeReals
+
+        model_run(run_fixed=False)
+
+        for v in network.model.pb_bin_inv:
+            network.model.pb_bin_inv[v].domain = Boolean
+
+        for v in network.model.cb_bin_inv:
+            network.model.cb_bin_inv[v].domain = Boolean
+
+        clear_solution()
+
     if OGEM_options["reference"] == "expansion":
+        solver_options.update({'preprocessing_aggregator': 5})
 
-        solver_options.update({'mip_tolerances_integrality': integrality_start})
-
-        model_run()
-
-        solver_options.pop('mip_tolerances_integrality')
+        MIP_warmstart()
 
         warmstart = True
 
@@ -1574,47 +1884,93 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
     if OGEM_options["pareto"]:
 
-        def update_parameters():
-            # Pareto iteration requires setting certain parameters as Pyomo parameters, so that rebuilding the model is not necessary at each iteration.
+        solver_options.update({'preprocessing_aggregator': 5})
+
+        def update_margins():
+            """ Since surpluses and nodal prices are model parameters, they need to be updated manually """
             prices = network.buses_t.marginal_price.divide(network.snapshot_weightings,axis=0)
 
             # Parameters are rounded to decimal_digits to improve the numerical properties of the problem.
             for sn in snapshots:
+                weight = network.snapshot_weightings[sn]
                 for bus in network.buses.index:
-                    network.model.marginal_prices[(bus, sn)] = prices.loc[sn, bus].round(decimal_digits)
+                    network.model.marginal_prices[(bus, sn)] = (prices.loc[sn, bus] * weight).round(decimal_digits)
                 for gen,(mc,bus) in network.generators[['marginal_cost','bus']].iterrows():
-                    network.model.gen_margins[(gen,sn)] = (prices.loc[sn, bus]-mc).round(decimal_digits)
+                    network.model.gen_margins[(gen,sn)] = max(((prices.loc[sn, bus]-mc) * weight).round(decimal_digits),0)
                 for su,(mc,bus) in network.storage_units[['marginal_cost','bus']].iterrows():
-                    network.model.su_margins[(su, sn)] = (prices.loc[sn, bus]-mc).round(decimal_digits)
+                    network.model.su_margins[(su, sn)] = max(((prices.loc[sn, bus]-mc) * weight).round(decimal_digits),0)
                 for pb,(bus0,bus1) in network.lines[['bus0','bus1']].iterrows():
-                    network.model.pb_margins[(pb, sn)] = (prices.loc[sn, bus1] - prices.loc[sn, bus0]).round(decimal_digits)
+                    network.model.pb_margins[(pb, sn)] = ((prices.loc[sn, bus1] - prices.loc[sn, bus0]) * weight)
                 for cb,(bus0,bus1) in network.links[['bus0','bus1']].iterrows():
-                    network.model.cb_margins[(cb, sn)] = (prices.loc[sn, bus1] - prices.loc[sn, bus0]).round(decimal_digits)
-
+                    network.model.cb_margins[(cb, sn)] = ((prices.loc[sn, bus1] - prices.loc[sn, bus0]) * weight)
             network.model.preprocess()
 
+        def update_expressions(country):
+            network.model.consumer_payments[country].value = value(network.model.consumer_payments_e[country])
+            network.model.producer_surplus[country].value = value(network.model.producer_surplus_e[country])
+            network.model.storage_surplus[country].value = value(network.model.storage_surplus_e[country])
+            network.model.pb_rent[country].value = value(network.model.pb_rent_e[country])
+            network.model.ptp_rent[country].value = value(network.model.ptp_rent_e[country])
+            network.model.conv_rent[country].value = value(network.model.conv_rent_e[country])
+            network.model.investment_cost[country].value = value(network.model.investment_cost_e[country])
+            network.model.welfare_constant[country].value = value(network.model.welfare_constant_e[country])
+            network.model.preprocess()
 
         def update_big_M():
             # Given a solution, the big_M can be set as the minimum between a standard value and the require value to unbound each pareto_welfare constraint.
+
             for country in network.model.country_participation:
                 participation = network.model.country_participation[country].value
                 network.model.country_participation[country].value = 1.
-                network.model.welfare_big_M[country] = max(- network.model.pareto_welfare[country].lslack() * 1.2 * network.model.welfare_big_M_scale.value,1e2) * parameters['snapshot_scale']
+                update_expressions(country)
+                network.model.welfare_big_M[country] = max(- network.model.pareto_welfare[country].lslack() * 1.2 * network.model.welfare_big_M_scale.value, 1.5e2) * parameters['MILP_snapshot_scale']
                 network.model.country_participation[country].value = participation
+                update_expressions(country)
 
+            network.model.welfare_big_M.display()
+            network.model.preprocess()
+
+        def update_parameters(trim=False):
+            # Pareto iteration requires setting certain parameters as Pyomo parameters, so that rebuilding the model is not necessary at each iteration.
+            update_margins()
+
+            # Trimming removes welfare components at certain snapshots according to the threshold, to reduce the welfare constraint equation size and improve the solve time. The complete constraint is checked ex-post to guarantee feasibility.
+
+            if trim:
+                for country in network.model.country_participation:
+                    update_expressions(country)
+
+                print({c: (network.model.country_participation[c].value, network.model.pareto_welfare[c].lslack()) for c in network.model.pareto_welfare})
+
+                margin_threshold = 0.3
+                print('margin threshold', margin_threshold)
+
+                min_pb_margin = sum([abs(network.model.pb_margins[m].value) for m in network.model.pb_margins]) / len(network.model.pb_margins) * margin_threshold
+                min_cb_margin = sum([abs(network.model.cb_margins[m].value) for m in network.model.cb_margins]) / len(network.model.cb_margins) * margin_threshold
+                min_gen_margin = sum([abs(network.model.gen_margins[m].value) for m in network.model.gen_margins]) / len(network.model.gen_margins) * margin_threshold / 2
+
+                for sn in snapshots:
+                    #for gen, (mc, bus) in network.generators[['marginal_cost', 'bus']].iterrows():
+                    #    network.model.gen_margins[(gen, sn)] = network.model.gen_margins[(gen,sn)].value * (abs(network.model.gen_margins[(gen,sn)].value) > min_gen_margin)
+                    for pb,(bus0,bus1) in network.lines[['bus0','bus1']].iterrows():
+                        network.model.pb_margins[(pb, sn)] = network.model.pb_margins[(pb, sn)].value * (abs(network.model.pb_margins[(pb, sn)].value) > min_pb_margin)
+                    for cb,(bus0,bus1) in network.links[['bus0','bus1']].iterrows():
+                        network.model.cb_margins[(cb, sn)] = network.model.cb_margins[(cb, sn)].value * (abs(network.model.cb_margins[(cb, sn)].value) > min_cb_margin)
+
+            for country in network.model.country_participation:
+                update_expressions(country)
+
+            print({c: (network.model.country_participation[c].value, network.model.pareto_welfare[c].lslack()) for c in network.model.pareto_welfare})
             network.model.preprocess()
 
         def welfare_check():
             # Check if the welfare constraints with updated marginal prices are all satisfied
             update_parameters()
 
-            update_big_M()
-
             if _pyomo_version < "5.1":
-                check = all([network.model.pareto_welfare[c].lslack() <= - 1/(10**decimal_digits) for c in network.model.pareto_welfare])
+                check = all([network.model.pareto_welfare[c].lslack() <= - 1/(10**1) for c in network.model.pareto_welfare])
             else:
-                check = all([network.model.pareto_welfare[c].lslack() >= - 1/(10**decimal_digits) for c in network.model.pareto_welfare])
-            print({c: (network.model.country_participation[c].value,network.model.pareto_welfare[c].lslack()) for c in network.model.pareto_welfare})
+                check = all([network.model.pareto_welfare[c].lslack() >= - 1/(10**1) for c in network.model.pareto_welfare])
 
             return check
 
@@ -1632,8 +1988,16 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
         print("Running Pareto-constrained model...")
 
         network.model.welfare_big_M_scale = Param(mutable=True, default=parameters['welfare_scale']) # Scale parameter to improve the numerical properties of the problem.
+        if solver_name == 'cplex':
+            pareto_tolerance = solver_options['mip_tolerances_mipgap']
+        else:
+            pareto_tolerance = solver_options['MIPGap']
 
-        define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, high_totex_factor)
+        define_pareto_welfare(network, snapshots, base_welfare, low_totex_factor, high_totex_factor, pareto_tolerance)
+
+        update_margins()
+
+        update_big_M()
 
         welfare_satisfied = welfare_check()
 
@@ -1648,25 +2012,28 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
             print("Welfare satisfied: {}, objective constant: {}, iterating...".format(welfare_satisfied,objective_constant))
 
-            # Save i - 1 values for comparison.
-            base_objective = network.objective
+            update_parameters(trim=True)
+
+            update_big_M()
+
+            # Save i - 1 objective and price values for comparison.
+            base_objective = network.MILP_objective
             base_shadow = network.buses_t.marginal_price.copy()
 
-
             if welfare_satisfied == True:
-                # If welfare was satisfied solution is feasible as warmstart.
+                # If welfare was satisfied the solution is feasible as warmstart.
+                clear_solution()
+
                 warmstart = True
-            else:
-                # If not, solve for warmstart with lax integrality tolerance.
-                warmstart = False
 
-                #solver_options.update({'mip_tolerances_integrality': integrality_start})
-
-                #model_run()
-
-                #solver_options.pop('mip_tolerances_integrality')
-
-                #warmstart = True
+            # else:
+            #     # If not, solve for warmstart relaxing investment binaries.
+            #
+            #     warmstart = True
+            #
+            #     MIP_warmstart()
+            #
+            #     warmstart = True
 
             model_run()
 
@@ -1674,7 +2041,9 @@ def network_lopf(network, snapshots=None, solver_name="glpk",
 
             big_M_duals_check()
 
-            objective_constant = (abs((base_objective - network.objective) / network.objective) < solver_options['mip_tolerances_mipgap']) # The objective will never be truly constant, but can vary only withing the mip gap tolerance.
+            print(base_objective,network.MILP_objective)
+
+            objective_constant = (abs((base_objective - network.MILP_objective) / network.MILP_objective) < pareto_tolerance) # The objective will never be truly constant, but can vary only withing the mip gap tolerance.
 
             shadow_gap = (network.buses_t.marginal_price - base_shadow)
 

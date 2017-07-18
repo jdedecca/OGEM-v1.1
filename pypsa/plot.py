@@ -1,3 +1,4 @@
+
 ## Copyright 2015-2017 Tom Brown (FIAS), Jonas Hoersch (FIAS), David
 ## Schlachtberger (FIAS)
 ## Copyright 2017 João Gorenstein Dedecca
@@ -217,9 +218,9 @@ def plot(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
 
 
 def plot_uni(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
-         line_colors='r', line_styles = 'solid',bus_sizes=70, line_widths=2, title="",
+         line_colors='r', line_styles = 'solid',bus_sizes=35, line_widths=2, title="",
          line_cmap=None, bus_cmap=None, boundaries=None,
-         geometry=False, branch_components=['Line', 'Link'],bc_min = None, bc_max = None):
+         geometry=False, branch_components=['Line', 'Link'],bc_min = None, bc_max = None, bus_line_widths = 1):
     """
     Plot the network buses and lines using matplotlib and Basemap.
 
@@ -289,11 +290,11 @@ def plot_uni(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
             (x1, y1), (x2, y2) = compute_bbox_with_margins(margin, x, y)
         else:
             x1, x2, y1, y2 = boundaries
-        bmap = Basemap(resolution='l', epsg=network.srid,
+        bmap = Basemap(resolution='i', epsg=network.srid,
                        llcrnrlat=y1, urcrnrlat=y2, llcrnrlon=x1,
                        urcrnrlon=x2, ax=ax)
-        bmap.drawcountries()
-        bmap.drawcoastlines()
+        bmap.drawcountries(zorder=1)
+        bmap.drawcoastlines(zorder=1,linewidth=0.5)
         bmap.fillcontinents(color='0.9',zorder=0)
 
         x, y = bmap(x.values, y.values)
@@ -308,7 +309,7 @@ def plot_uni(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
         c.fillna("b", inplace=True)
         #c = list(c.values)
     s = pd.Series(bus_sizes, index=network.buses.index, dtype="float").fillna(10)
-    bus_collection = ax.scatter(x[bus_mask], y[bus_mask], c=c[bus_mask], s=s[bus_mask], linewidths=1,edgecolors='k', cmap=bus_cmap,vmin = bc_min,vmax = bc_max)
+    bus_collection = ax.scatter(x[bus_mask], y[bus_mask], c=c[bus_mask], s=s[bus_mask], linewidths=bus_line_widths,edgecolors='k', cmap=bus_cmap,vmin = bc_min,vmax = bc_max)
 
     def as_branch_series(ser):
         if isinstance(ser, pd.Series):
@@ -385,7 +386,7 @@ def plot_uni(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
                                       antialiaseds=(1,),
                                       linestyles=l_styles,
                                       colors=l_colors,
-                                      alpha = 0.5,
+                                      alpha = .8,
                                       transOffset=ax.transData)
 
         if l_nums is not None:
@@ -394,11 +395,11 @@ def plot_uni(network, margin=0.05, ax=None, basemap=True, bus_colors='b',
             l_collection.autoscale()
 
         ax.add_collection(l_collection)
-        l_collection.set_zorder(1)
+        l_collection.set_zorder(2)
 
         branch_collections.append(l_collection)
 
-    bus_collection.set_zorder(2)
+    bus_collection.set_zorder(3)
 
     ax.update_datalim(compute_bbox_with_margins(margin, x, y))
     ax.autoscale_view()

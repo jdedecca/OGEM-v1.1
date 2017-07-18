@@ -34,7 +34,7 @@ import pandas as pd
 
 import os
 
-import pypsa
+import pypsa_new as pypsa
 
 import numpy as np
 
@@ -192,7 +192,7 @@ def import_components_from_dataframe(network,dataframe,cls_name):
     string_attrs = {"bus","bus0","bus1","carrier"} & set(dataframe.columns)
 
     for col in string_attrs:
-        dataframe[col] = dataframe.loc[:,col].astype(str)
+        dataframe[col] = dataframe[col].astype(str)
 
     old_df = network.df(cls_name)
 
