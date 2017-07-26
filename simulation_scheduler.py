@@ -1,8 +1,4 @@
-## Copyright 2015-2017 Tom Brown (FIAS), Jonas Hoersch (FIAS), David
-## Schlachtberger (FIAS)
 ## Copyright 2017 João Gorenstein Dedecca
-
-## The following code is a modification of the optimal power flow script of the PyPSA package (Python for Power System Analysis), pypsa.org
 
 ## This program is free software; you can redistribute it and/or
 ## modify it under the terms of the GNU General Public License as
@@ -28,7 +24,6 @@ Copyright 2017 João Gorenstein Dedecca, GNU GPL 3
 import sys, os
 from OGEM import Load_Parameters
 from simulation import main
-import multiprocessing
 
 def execute_run(data):
     """ Calls each run for a given run schedule.
@@ -45,7 +40,7 @@ def schedule():
     # If no arguments are passed the simulation_scheduler runs all folders in Simulations.
     if len(sys.argv) == 1:
         runs = []
-        for (dirpath, dirnames, filenames) in os.walk("Simulations"):
+        for (dirpath, dirnames, filenames) in os.walk("input"):
             runs.extend(dirnames)
     else:
         runs = sys.argv[1:]
@@ -57,19 +52,11 @@ def schedule():
             parameters = Load_Parameters(run)
             data.append(run)
 
-    # Simulations are executed in parallel or sequentially depending on the system. Adapt as necessary.
-    if sys.platform == 'linux':
-        print('Linux, executing runs in parallel')
-        # p = multiprocessing.Pool(1) # Single run option for debugging.
-        p = multiprocessing.Pool(multiprocessing.cpu_count())  # Parallel run.
-        p.map(execute_run, data)
-    else:
-        print('Windows, executing runs sequentially')
-        for rn, run in enumerate(runs):
-            if run[:4] == "OGEM":  # Run schedules must start with "OGEM".
-                sys.stdout = sys.__stdout__
-                print("Running", str(data[rn]))  # Indicate current run schedule.
-                execute_run(data[rn])
+    for rn, run in enumerate(runs):
+        if run[:4] == "OGEM":  # Run schedules must start with "OGEM".
+            sys.stdout = sys.__stdout__
+            print("Running", str(data[rn]))  # Indicate current run schedule.
+            execute_run(data[rn])
 
 if __name__ == '__main__':
     schedule()

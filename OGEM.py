@@ -22,15 +22,10 @@ Copyright 2017 João Gorenstein Dedecca, GNU GPL 3
 """
 
 import os, sys, csv, warnings, gc, datetime,psutil
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import networkx as nx
 import numpy as np
 import pandas as pd
 import pypsa
 from pyclustering.cluster.kmedoids import kmedoids
-from copy import deepcopy
-import planarity
 import multiprocessing
 
 def Period_Run(period, network, network_branches, input_panel):
@@ -58,7 +53,7 @@ def Model_Check(network):
         sys.exit()
 
     # The reduced network should not have 0 p_nom generators.
-    if any((~network.generators["p_nom_extendable"]) & (network.generators["p_nom"] == 0)):
+    if any((~ network.generators["p_nom_extendable"]) & (network.generators["p_nom"] == 0)):
         print("Warning: Non-extendable generators with 0 P_nom present")
         sys.exit()
 
@@ -98,7 +93,7 @@ def Results_Check(network):
 
     # Negative marginal prices are possible due to flow constraints but unlikely.
     # Clip negative prices and warn users of ocurrence.
-    if network.buses_t.marginal_price.min().min() < -1E6:
+    if network.buses_t.marginal_price.min().min() < -1e6:
         print("Warning: Negative bus prices. Clipping prices to $0")
         print(network.buses_t.marginal_price.loc[:,network.buses_t.marginal_price.min() < 0])
 
@@ -132,13 +127,25 @@ def MILP_OPF(period,network,OGEM_options,base_welfare=None):
         barrier_convergetol: Tolerance for barrier subproblem algorithm.
     """
 
+    solver_name = 'cplex'
+
+    # Adapt number of maximum parallel cores according to HPC cluster
+    max_cores = 16 if multiprocessing.cpu_count() == 16 else 8 if multiprocessing.cpu_count() == 32 else 8
+    print('Max cores:', multiprocessing.cpu_count())
     if (OGEM_options["reference"] == "base"):
-        solver_options = {'simplex_tolerances_optimality': 1e-4, 'simplex_tolerances_feasibility': 1e-4,'barrier_convergetol':1E-4, 'workdir': os.path.join(os.getcwd(),'network',parameters["simulation_name"]), 'lpmethod': 4,'barrier_crossover': parameters["barrier_crossover"], 'threads': min(multiprocessing.cpu_count()-1, 8),'barrier_display':1,'randomseed':201607292,'barrier_algorithm': 0,'barrier_startalg': 1}
-
+        if solver_name == 'cplex':
+            solver_options = {'workdir': os.path.join(os.getcwd(),'network',parameters["simulation_name"]),'simplex_tolerances_optimality': 1e-4, 'simplex_tolerances_feasibility': 1e-4,'barrier_convergetol':1e-4, 'lpmethod': 4,'barrier_crossover': parameters["barrier_crossover"], 'threads': min(multiprocessing.cpu_count()-1, max_cores),'barrier_display':1,'randomseed':201607292,'barrier_algorithm': 0,'barrier_startalg': 1}
+        else:
+            print("Solver parameters not found, exiting...")
+            sys.exit()
     else:
-        solver_options = {'simplex_tolerances_optimality': 1e-4, 'simplex_tolerances_feasibility': 1e-4,'mip_tolerances_mipgap': 5e-3, 'mip_tolerances_absmipgap': 1e-5, 'barrier_convergetol':1E-6,'workdir': os.path.join(os.getcwd(),'network',parameters["simulation_name"]), 'mip_strategy_subalgorithm': 4,'threads': min(multiprocessing.cpu_count()-1, 8),'mip_display':2,'randomseed':201607292}
+        if solver_name == 'cplex':
+            solver_options = {'simplex_tolerances_optimality': 1e-4, 'simplex_tolerances_feasibility': 1e-4,'mip_tolerances_mipgap': 5e-3, 'mip_tolerances_absmipgap': 1e-5, 'barrier_convergetol':1e-4,'workdir': os.path.join(os.getcwd(),'network',parameters["simulation_name"]), 'mip_strategy_subalgorithm': 4,'lpmethod': 4,'barrier_crossover': parameters["barrier_crossover"],'threads': min(multiprocessing.cpu_count()-1, max_cores),'mip_display':2,'randomseed':201607292,'preprocessing_aggregator':0,'emphasis_mip':1}
+        else:
+            print("Solver parameters not found, exiting...")
+            sys.exit()
 
-    # Keep solver .lp and .sol files for debugging if necessary
+    # If True, keep solver .lp and .sol files for debugging if necessary
     if OGEM_options["reference"] == "expansion":
         keep_files = False
     else:
@@ -167,9 +174,7 @@ def MILP_OPF(period,network,OGEM_options,base_welfare=None):
 
     Model_Check(reduced_network)
 
-    Write_Network(reduced_network, period, 'pre-run') # Write network for debugging
-
-    reduced_network.lopf(snapshots=reduced_network.snapshots, solver_name="cplex", keep_files = keep_files,OGEM_options=OGEM_options,base_welfare=base_welfare,parameters=parameters,solver_options=solver_options)
+    reduced_network.lopf(snapshots=reduced_network.snapshots, solver_name=solver_name, keep_files = keep_files,OGEM_options=OGEM_options,base_welfare=base_welfare,parameters=parameters,solver_options=solver_options)
 
     Results_Check(reduced_network)
 
@@ -189,35 +194,43 @@ def MILP_Network(period, network):
                           & parameters["branch_parameters"][["system0","system1"]].isin(parameters["cooperative_systems"]).all(axis = 1)
 
     for b,branch in parameters["branch_parameters"][extendable_branches].iterrows():
-        branch_data = {"p_nom_extendable":True,"s_nom_extendable":True,"p_min_pu" : -1.0} # Although these parameters are not coherent, during import PyPSA only imports the standard parameters for each component.
+        branch_data = {"p_nom_extendable":True,"s_nom_extendable":True,"p_min_pu" : -1.0} # Update branch parameters since during import PyPSA only imports the standard parameters for each component
         branch_data.update(branch.to_dict())
-        if not ((parameters["cooperation_limit"] is 0) and (branch["cooperative"] == True)): # A 0 cooperation limit prohibits any cooperative branch
-            for n,capacity in enumerate(parameters["IC_cap"]):
+        if not ((parameters["cooperation_limit"] is 0) and (branch["cooperative"] == True)): # A cooperation limit == 0 prohibits any cooperative branch, so skip this step for cooperative branches
+            for n,capacity in enumerate(parameters["IC_cap"]): # Create one branch for every IC_cap element
                 name = b + "-" + str(capacity)
+                import_parameters = ["branch_type", "branch_class", "cooperative", "cooperative", "system0", "system1"]
+
                 if branch["branch_type"] in ["AC","DC"]:
                         milp_network.add("Line",name,**branch_data)
-                        milp_network.lines.loc[name,["branch_type","branch_class","cooperative","cooperative","marginal_cost"]] = branch[["branch_type","branch_class","cooperative","marginal_cost"]] # These parameters are not standard to lines and need to be imported manually
-                        milp_network.lines.loc[name, ["system0","system1"]] = branch[["system0","system1"]] # System data is also not standard
+                        milp_network.lines.loc[name,import_parameters + "marginal_cost"] = branch[import_parameters + "marginal_cost", ] # These parameters are not standard to lines and need to be imported manually
+                        milp_network.lines.loc[name, []] = branch[[]] # System data is also not standard
+
+                        # Set the minimum for each IC_cap element
                         if n == 0:
                             milp_network.lines.loc[name,"s_nom_min"] = parameters['min_cap']
                         else:
                             milp_network.lines.loc[name,"s_nom_min"] = parameters["IC_cap"][n-1]
                         milp_network.lines.loc[name,"s_nom_max"] = capacity
+
+                        # Set electrical parameters
                         milp_network.lines.loc[name, "base_branch"] = b
                         milp_network.lines.loc[name, "r"] = branch["r"] * 1 / (capacity-milp_network.lines.loc[name,"s_nom_min"]) * 2 # Original value source: 0.0087 ohms/km for a single conductor (EuropaCable, s.d.), 0.015 ohms/km for a ~1000MW HVDC line (Pinto, 2014)
                         milp_network.lines.loc[name, "x"] = branch["x"] * 1 / (capacity-milp_network.lines.loc[name,"s_nom_min"]) * 2 # Original value source: 0.181 H/km per conductor (EuropaCable, s.d.)
 
                 elif branch["branch_type"] == "ptp":
                         milp_network.add("Link",name,**branch_data)
-                        milp_network.links.loc[name,["branch_type","branch_class","cooperative"]] = branch[["branch_type","branch_class","cooperative"]] # These parameters are not standard to lines and need to be imported manually
+                        milp_network.links.loc[name,import_parameters] = branch[import_parameters] # These parameters are not standard to lines and need to be imported manually
+
                         milp_network.links.loc[name, "p_nom_max"] = capacity
                         milp_network.links.loc[name, "base_branch"] = b
-                        milp_network.links.loc[name, ["system0","system1"]] = branch[["system0","system1"]]
+
+                        # Set the minimum for each IC_cap element
                         if n == 0:
                             milp_network.links.loc[name, "p_nom_min"] = parameters['min_cap']
                         else:
                             milp_network.links.loc[name, "p_nom_min"] = parameters["IC_cap"][n - 1]
-
+    # Add converters to the investment portfolio
     for b,branch in parameters["branch_parameters"][parameters["branch_parameters"]["branch_type"].isin(["converter"])].iterrows():
          branch_data = {"p_nom_extendable":True ,"p_nom_min":0,"p_min_pu":-1.0}
          branch_data.update(branch.to_dict())
@@ -227,11 +240,12 @@ def MILP_Network(period, network):
          milp_network.links.loc[group,"base_branch"] = b
          milp_network.links.loc[group, ["system0","system1"]] = branch[["system0","system1"]]
 
-    extendable_farms_i = milp_network.generators.loc[(milp_network.generators["carrier"] == "Wind - North Sea")&(milp_network.generators["capital_cost"] > 0)].index # Positive capital costs exclude the wind farms which already existed in the first period.
+    # Extendable wind farms are those with positive capital cost. This excludes farms which already existed in the first period.
+    extendable_farms_i = milp_network.generators.loc[(milp_network.generators["carrier"] == "Wind - North Sea")&(milp_network.generators["capital_cost"] > 0)].index
     milp_network.generators.loc[extendable_farms_i,"p_nom_extendable"] = True # This was set to False for the base optimization.
     return milp_network
 
-def Output_Recovery(output, network, network_branches, period, milp_network = False):
+def Output_Recovery(output, network, period, milp_network = False):
     """ Calculate operational data from solution and aggregate from snapshots to representative hour:
         Total operational cost
         Nodal prices and demand
@@ -268,6 +282,7 @@ def Output_Recovery(output, network, network_branches, period, milp_network = Fa
     gen_marginal_cost = pd.concat([output.generators.marginal_cost,output.storage_units.marginal_cost], axis=0)
 
     data["bus_shadow"] = data["bus_shadow"].divide(output.snapshot_weightings, axis = 0, level = "snapshot") # Since the marginal cost at the LP/MILP objective function is weighed by the snapshot weighing we need to rescale the marginal prices
+
     data["gen_shadow"] = data["bus_shadow"].loc[:,gen_sto_buses]
     data["gen_shadow"].columns = output.generators.index.append(output.storage_units.index) # Rename columns from bus to generator names
     data["gen_cost"] = data["generator_gen"].clip(lower = 0) * gen_marginal_cost # Clipping because of possible storage units with positive marginal cost
@@ -317,7 +332,9 @@ def Output_Recovery(output, network, network_branches, period, milp_network = Fa
         else:
             CBA_data["participating countries"] = pd.DataFrame.from_dict(
                 {'participation': {c: output.model.country_participation[c].value for c in output.model.country_participation}})
-        # Save invested lines, links and generators.
+
+        del output.model
+        # Save optimal lines, links and generators.
         optimal_lines = output.lines[(output.lines["s_nom_extendable"] == True) & ((output.lines["s_nom_opt"] - output.lines["s_nom"])>1E-5)]
         optimal_links = output.links[(output.links["p_nom_extendable"] == True) & ((output.links["p_nom_opt"] - output.links["p_nom"])>1E-5)]
         optimal_generators = output.generators[(output.generators["p_nom_extendable"] == True) & (output.generators["p_nom_opt"] > output.generators["p_nom"])]
@@ -329,7 +346,8 @@ def Output_Recovery(output, network, network_branches, period, milp_network = Fa
             print(CBA_data["optimal expansions"])
 
         CBA_data["optimal generators"] = optimal_generators
-        print(CBA_data["optimal generators"])
+        if len(CBA_data["optimal generators"]) > 0:
+            print(CBA_data["optimal generators"])
 
     # Clusters are used in the onshore distribution function to assign national offshore nodes to offshore components.
     cluster_network = output.copy(with_time=False)
@@ -394,6 +412,7 @@ def Congestion_Distribution(CBA_data, network, network_branches):
         Afterwards the onshore distribution reallocates any offshore congestion rent to onshore buses.
      """
 
+    # The congestion distribution matrix maps branch congestion rent to buses.
     congestion_distribution = pd.DataFrame(0, index=CBA_data["branch congestion rent"].index, columns=network.buses.index)
 
     for branch in congestion_distribution.index:
@@ -408,6 +427,7 @@ def Congestion_Distribution(CBA_data, network, network_branches):
 
 def Cost_Calculation(CBA_data, network, network_branches):
     """ Calculates investment cost of transmission and generation """
+
     def Expansion_Cost_Calculation(unconnected_branches):
         """ Calculates the investment cost for any given combination of branches"""
         cost_vector = pd.Series(0, index=network.buses.index)
@@ -439,25 +459,129 @@ def Cost_Calculation(CBA_data, network, network_branches):
     CBA_data["nodal gen inv cost"] = generators.groupby(["bus"])["cost"].sum()
     CBA_data["nodal inv cost"] = CBA_data["nodal trans inv cost"].add(CBA_data["nodal gen inv cost"],fill_value = 0)
 
-def Snapshot_Selection(network, milp_network, period):
-    """ Selects a number of representative snapshots among all year snapshots using the k-medoids algorithms using marginal prices as the information """
+def Snapshot_Selection(network, milp_network ,method = 'k-medoids',series='prices',n_components = 90):
+    """ Selects a number of representative snapshots among all year snapshots using the k-medoids/agglomerative algorithms using marginal prices as the information """
+    from sklearn.decomposition import PCA
+
     print("Snapshot selection at {:%H:%M}...".format(datetime.datetime.now()))
+    print("Clustering series is", series)
+    if series == 'NS prices':
+        countries = ['gb', 'be', 'nl', 'de', 'dk', 'lu', 'no', 'se', 'fr', 'ie']
+        clustering_series = network.buses_t.marginal_price.loc[:,network.buses.country.isin(countries)]
 
-    print('Clustering by marginal prices')
-    #TODO Possible to filter marginal_prices only to nodes where it changes between snapshots. Does not improve representativity though.
-    countries = ['gb', 'be', 'nl','de', 'dk', 'lu', 'no', 'se', 'fr', 'ie']
-    clustering_series = network.buses_t.marginal_price.loc[:,network.buses.country.isin(countries)]
-    print("WARNING: Restricting clustering series to North Sea countries")
+    elif series == 'prices':
+        clustering_series = network.buses_t.marginal_price
+        pca = PCA(n_components=n_components)
+        pca.fit(clustering_series)
+        pca_series = pca.transform(clustering_series)
 
-    # Snapshot selection with marginal prices
-    initial_index =np.arange(0, parameters["snapshots"], parameters["snapshots"] / parameters["clusters"]).astype(int) # Distribute starting snapshots equally among snapshots.
-    clusters = kmedoids(clustering_series.as_matrix(), initial_index, tolerance=0.25)
-    clusters.process()
-    medoids = [int(np.where(np.all(clustering_series == medoid, axis=1))[0]) for medoid in clusters.get_medoids()] # Find medoids list among all snapshots.
-    milp_network.set_snapshots(network.snapshots[medoids])
-    milp_network.snapshot_weightings.loc[:] = [len(cluster) for cluster in clusters.get_clusters()] # Weight of snapshots (medoids) is number of members in each cluster
+    elif series == 'net load':
+        net_load = network.loads_t.p_set
+        net_load = net_load.sub((network.generators_t.p_max_pu * network.generators.p_nom[network.generators_t.p_max_pu.columns]).groupby(network.generators["bus"], axis=1).sum(),
+                                fill_value=0)
+        net_load = net_load.sub(network.storage_units_t.p.groupby(network.storage_units["bus"], axis=1).sum(), fill_value=0)
+        net_load = net_load.fillna(0)
+        clustering_series = net_load # Snapshot selection with net load = loads - renewable - fixed storage
+        pca = PCA(n_components=n_components)
+        pca.fit(clustering_series)
+        pca_series = pca.transform(clustering_series)
+
+    else:
+        print("Warning: Clustering series type not found")
+        sys.exit()
+
+    print('Clustering method is', method)
+    if method == 'k-medoids':
+        # Snapshot selection with marginal prices
+        initial_index =np.arange(0, parameters["snapshots"], parameters["snapshots"] / parameters["clusters"]).astype(int) # Distribute starting snapshots equally among snapshots.
+        clusters = kmedoids(clustering_series.as_matrix(), initial_index, tolerance=0.05)
+        clusters.process()
+        medoids = [int(np.where(np.all(clustering_series == medoid, axis=1))[0][0]) for medoid in clusters.get_medoids()] # Find medoids list among all snapshots.
+        k_labels = [c for ind in range(len(clustering_series)) for c, cluster in enumerate(clusters.get_clusters()) if ind in cluster]
+        weightings = [len(cluster) for cluster in clusters.get_clusters()]
+        milp_network.set_snapshots(network.snapshots[medoids])
+        milp_network.snapshot_weightings.loc[:] = weightings # Weight of snapshots (medoids) is number of members in each cluster
+
+    elif method == 'pca_k-medoids':
+        # Snapshot selection with marginal prices
+        initial_index =np.arange(0, parameters["snapshots"], parameters["snapshots"] / parameters["clusters"]).astype(int) # Distribute starting snapshots equally among snapshots.
+        clusters = kmedoids(pca_series, initial_index, tolerance=0.25)
+        clusters.process()
+        medoids = [int(np.where(np.all(pca_series == medoid, axis=1))[0][0]) for medoid in clusters.get_medoids()] # Find medoids list among all snapshots.
+        k_labels = [c for ind in range(len(pca_series)) for c, cluster in enumerate(clusters.get_clusters()) if ind in cluster]
+        weightings = [len(cluster) for cluster in clusters.get_clusters()]
+        milp_network.set_snapshots(network.snapshots[medoids])
+        milp_network.snapshot_weightings.loc[:] = weightings # Weight of snapshots (medoids) is number of members in each cluster
+
+    elif method == 'agglomerative':
+        from sklearn.cluster import AgglomerativeClustering
+        from sklearn.metrics.pairwise import pairwise_distances
+
+        clustering = AgglomerativeClustering(linkage='ward', n_clusters=parameters["clusters"])
+        clustering.fit(clustering_series.as_matrix())
+        AC_medoids = []
+        for cl_num in pd.unique(clustering.labels_):
+            cluster = clustering_series.loc[clustering.labels_ == cl_num, :]
+            cluster_index = clustering_series.loc[clustering.labels_ == cl_num, :].index
+            AC_medoids.append(cluster.index[np.argmin(pairwise_distances(cluster).sum(axis=0))])
+        weightings = pd.Series(clustering.labels_).value_counts().reindex(pd.unique(clustering.labels_))
+        milp_network.set_snapshots(network.snapshot_weightings[AC_medoids].index)
+        milp_network.snapshot_weightings.loc[:] = weightings.as_matrix() # Weight of snapshots (medoids) is number of members in each cluster
+
+    elif method == 'pca_agglomerative':
+        from sklearn.cluster import AgglomerativeClustering
+        from sklearn.metrics.pairwise import pairwise_distances
+
+        clustering = AgglomerativeClustering(linkage='ward', n_clusters=parameters["clusters"])
+        clustering.fit(pca_series)
+        AC_medoids = []
+        for cl_num in pd.unique(clustering.labels_):
+            cluster = pca_series[clustering.labels_ == cl_num, :]
+            cluster_index = clustering_series.loc[clustering.labels_ == cl_num, :].index
+            AC_medoids.append(cluster_index[np.argmin(pairwise_distances(cluster).sum(axis=0))])
+        weightings = pd.Series(clustering.labels_).value_counts().reindex(pd.unique(clustering.labels_))
+        milp_network.set_snapshots(network.snapshot_weightings[AC_medoids].index)
+        milp_network.snapshot_weightings.loc[:] = weightings.as_matrix()  # Weight of snapshots (medoids) is number of members in each cluster
+        milp_network.set_snapshots(network.snapshot_weightings[AC_medoids].index)
+        milp_network.snapshot_weightings.loc[:] = weightings.as_matrix()  # Weight of snapshots (medoids) is number of members in each cluster
+
+    else:
+        print("Warning: Clustering method not found")
+        sys.exit()
+
+    milp_network.snapshot_weightings.loc[:] = milp_network.snapshot_weightings / milp_network.snapshot_weightings.sum()
 
     print("Selection finished at {:%H:%M}...".format(datetime.datetime.now()))
+
+def Time_Series_Scaling(network,milp_network,load_method = 'mixed'):
+
+    print('RES scaling method: Peak')
+    factors = pd.Series()
+    peak_RES_factor = milp_network.generators_t.p_max_pu.max().groupby(milp_network.generators.carrier).max() / network.generators_t.p_max_pu.max().groupby(network.generators.carrier).max()
+    milp_network.generators_t.p_max_pu = milp_network.generators_t.p_max_pu.apply(lambda x: x / peak_RES_factor[milp_network.generators.loc[x.name, 'carrier']], axis=0)
+    factors = factors.append(peak_RES_factor)
+
+    print('Load scaling method:',load_method)
+
+    if load_method == 'mean':
+        load_factor = milp_network.loads_t.p_set.mean().mean() / network.loads_t.p_set.mean().mean()
+    elif load_method == 'peak':
+        load_factor = milp_network.loads_t.p_set.max().max() / network.loads_t.p_set.max().max()
+    elif load_method == 'mixed':
+        mean_load_factor = milp_network.loads_t.p_set.mean().mean() / network.loads_t.p_set.mean().mean()
+        peak_load_factor = milp_network.loads_t.p_set.max().max() / network.loads_t.p_set.max().max()
+        load_factor = (mean_load_factor+peak_load_factor)/2
+        factors = factors.append(pd.Series(mean_load_factor, index=['mean_load_factor']))
+        factors = factors.append(pd.Series(peak_load_factor, index=['peak_load_factor']))
+        factors = factors.append(pd.Series(load_factor, index=['load_factor']))
+    else:
+        print("Warning: Load scaling method not found, exiting.")
+        sys.exit()
+
+    milp_network.loads_t.p_set = milp_network.loads_t.p_set / load_factor
+
+    factors.name = 'Scaling factors'
+    print(factors)
 
 def Expansions_Simulation(period, network_branches, network, input_panel):
     """ Runs the base, expansion and final cases for the period network.
@@ -477,7 +601,7 @@ def Expansions_Simulation(period, network_branches, network, input_panel):
     Write_Network(base_output, period, OGEM_options["reference"])
 
     # Base case operational data and welfare component calculation.
-    CBA_base = Output_Recovery(base_output, network, network_branches,period)
+    CBA_base = Output_Recovery(base_output, network, period)
     Congestion_Distribution(CBA_base, network, network_branches)
     Onshore_Distribution(CBA_base,network)
     Write_Output(CBA_base, period,'base')
@@ -487,15 +611,17 @@ def Expansions_Simulation(period, network_branches, network, input_panel):
     OGEM_options = {"reference": "expansion", "pareto": parameters["pareto"], "cooperation_limit": parameters["cooperation_limit"]}
     milp_network = MILP_Network(period, network) # Include extendable transmission and generation in the network.
 
-    Snapshot_Selection(base_output, milp_network, period)
+    Snapshot_Selection(base_output, milp_network) # Select snapshots for the MILP and to calculate welfare with reduced snapshots
 
     if parameters['north_sea_expansion']:
         # Fix the dispatch and storage of storage and energy-constrained generators since the snapshot selection loses the temporal connection of snapshots.
-        inflow_generators = base_output.generators[base_output.generators.inflow > 0]
-        pypsa.io.import_series_from_dataframe(milp_network, base_output.generators_t.p.loc[:, inflow_generators.index] * (base_output.generators_t.p.loc[:, inflow_generators.index].abs() > 1E-4), "Generator", "p_set")
-        pypsa.io.import_series_from_dataframe(milp_network, base_output.storage_units_t.p * (base_output.storage_units_t.p.abs()>1E-4), "StorageUnit", "p_set")
+        inflow_generators = base_output.generators[base_output.generators.inflow > 0].index
+        pypsa.io.import_series_from_dataframe(milp_network, base_output.generators_t.p.loc[:, inflow_generators] * (base_output.generators_t.p.loc[:, inflow_generators].abs() > 1e-4), "Generator", "p_set") # Dispatches under .1 MW are disconsidered
+        pypsa.io.import_series_from_dataframe(milp_network, base_output.storage_units_t.p * (base_output.storage_units_t.p.abs()>1e-4), "StorageUnit", "p_set") # Dispatches under .1 MW are disconsidered
+        if 'expansion_scaling' in parameters.keys():
+            if parameters['expansion_scaling']:
+                Time_Series_Scaling(network, milp_network)
 
-        pypsa.io.import_series_from_dataframe(milp_network, base_output.storage_units_t.p.clip(lower=0), "StorageUnit", "inflow") # Provide sufficient inflow to the dispatch of fixed storage units.
         milp_network.scenarios.loc[:] = milp_network.snapshots # For future use in stochastic optimization.
 
         # Calculate the operation data and welfare components of the base case using the selected snapshots, to obtain the base welfare.
@@ -503,30 +629,31 @@ def Expansions_Simulation(period, network_branches, network, input_panel):
         base_output.buses_t.marginal_price = base_output.buses_t.marginal_price.mul(milp_network.snapshot_weightings/base_output.snapshot_weightings,axis=0) # Calculation of base welfare requires correct marginal prices, which need to be weighed by the probability of the representative snapshots.
         base_output.snapshot_weightings = milp_network.snapshot_weightings
 
-        CBA_reduced_base = Output_Recovery(base_output, network, network_branches,period)
+        # The reduced base CBA represents the CBA with reduced snapshots.
+        CBA_reduced_base = Output_Recovery(base_output, network, period)
         Congestion_Distribution(CBA_reduced_base, network, network_branches)
         Onshore_Distribution(CBA_reduced_base,network)
         base_welfare = CBA_reduced_base["nodal benefit"].groupby(base_output.buses.country).sum() # The base welfare is the reference used by countries to decide on cooperation when the pareto welfare constraint is active.
         del CBA_reduced_base # To reduce memory usage.
+
     del base_output # To reduce memory usage.
-    gc.collect()
+    del CBA_base
 
     if parameters['north_sea_expansion']: # Determines whether to run the expansion case. A no-expansion simulation is used to compare the welfare components of expansion simulations.
         output = MILP_OPF(period,milp_network,OGEM_options=OGEM_options,base_welfare=base_welfare)
         Write_Network(output, period, OGEM_options["reference"])
-        del milp_network
-        gc.collect()
+        del milp_network # To reduce memory usage.
 
         # Calculate the operation data and welfare components of the expansion case. The expansion case is the only to have cost calculations.
-        CBA_exp = Output_Recovery(output,network, network_branches,period, milp_network=True)
+        CBA_exp = Output_Recovery(output,network, period, milp_network=True)
         Cost_Calculation(CBA_exp, network, network_branches)
         Congestion_Distribution(CBA_exp, network, network_branches)
         Onshore_Distribution(CBA_exp, network)
 
         del output # To reduce memory usage.
-        gc.collect()
 
     else:
+        # Create empty optimal investment records in no expansion case.
         CBA_exp = {}
         CBA_exp["optimal expansions"] = network.lines.copy().drop(network.lines.index)
         CBA_exp["optimal generators"] = network.generators.copy().drop(network.generators.index)
@@ -565,13 +692,16 @@ def Expansions_Simulation(period, network_branches, network, input_panel):
         Write_Network(final_output, period, 'final')
 
         # Calculate the operation data and welfare components of the final case.
-        CBA_final = Output_Recovery(final_output, network, network_branches,period)
+        CBA_final = Output_Recovery(final_output, network, period)
         Congestion_Distribution(CBA_final, network, network_branches)
         Onshore_Distribution(CBA_final,network)
-        Write_Output(CBA_final, period,'final')
 
         # Add investment cost to final results and write.
         CBA_final["nodal components"] = pd.concat([CBA_final["nodal components"],CBA_exp["nodal components"].loc[:,["inv cost","gen inv cost","trans inv cost"]]],axis=1)
+
+        Write_Output(CBA_final, period,'final')
+        del final_output
+        del CBA_final
 
     return CBA_exp
 
@@ -663,12 +793,12 @@ def Network_Setup(period, input_panel):
             network.add("Bus",name,**bus.to_dict())
             # Adding bus_data manually for non-standard or non-existing parameters
             bus_data = {"base_bus": b, "terminal_type": bus.terminal_type, "x": bus.x, "y": bus.y,
-                 "carrier": carrier, "country": bus.country,"system":bus.system,"v_nom":30} # x and y are bus coordinates, terminal types are onshore or offshore
+                 "carrier": carrier, "country": bus.country,"system":bus.system,"v_nom":3. * 10 ** np.floor(np.log10(bus.v_nom))} # x and y are bus coordinates, terminal types are onshore or offshore
             for key,value in bus_data.items():
                 network.buses.loc[name,key] = value
 
     # PyPSA line data: name, bus0, bus1, x, r, s_nom, s_nom_extendable, length.
-    # PyPSA link data: name, bus0, bus1, s_nom, s_nom_extendable.
+    # PyPSA link data: name, bus0, bus1, p_nom, p_nom_extendable.
 
     # Append converters between AC and DC buses to network_branches
     for b in network_branches[["bus0", "bus1"]].stack().unique():
@@ -683,10 +813,34 @@ def Network_Setup(period, input_panel):
     network_branches.loc[dc_branches,"bus0"] = network_branches.loc[dc_branches,"bus0"] + "_" + network_branches.loc[dc_branches,"branch_type"]
     network_branches.loc[dc_branches,"bus1"] = network_branches.loc[dc_branches,"bus1"] + "_" + network_branches.loc[dc_branches,"branch_type"]
 
+    # To calculate buses distances. Not used.
+    def haversine(coord):
+        """
+        Calculate the great circle distance between two points 
+        on the earth (specified in decimal degrees)
+        Thanks to Michael Dunn in http://stackoverflow.com/questions/4913349/haversine-formula-in-python-bearing-and-distance-between-two-gps-points
+        """
+        # convert decimal degrees to radians
+        from math import radians, cos, sin, asin, sqrt
+        lon1, lon2, lat1, lat2 = map(radians, coord.tolist())
+
+        # haversine formula
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+        c = 2 * asin(sqrt(a))
+        r = 6371  # Radius of earth in kilometers. Use 3956 for miles
+        return c * r
+
+    if False:
+        coordinates = pd.concat([network_branches.loc[:, ['bus0', 'bus1']].replace(network.buses.x), network_branches.loc[:, ['bus0', 'bus1']].replace(network.buses.y)], axis=1)
+        coordinates.columns = ['x0', 'x1', 'y0', 'y1']
+        network_branches.loc[:, "length"] = coordinates.apply(haversine,axis=1)
+
     # Update branch_parameters with new network_branches data before adding the exogenous branches of input_panel["transmission"]
     parameters["branch_parameters"] = network_branches.loc[:,["bus0", "bus1", "branch_type", "branch_class", "system0", "system1", "capital_cost","marginal_cost", "length", "r", "x","cooperative"]]
 
-    # The input_panel["transmission"] constains the exogenous branches of the scenario
+    # The input_panel["transmission"] contains the exogenous branches of the scenario
     for b, branch in input_panel["transmission"].iterrows():
         input_panel["transmission"].loc[b,"branch_class"] = branch_class(branch)
     network_branches = pd.concat([network_branches, input_panel["transmission"][~input_panel["transmission"].index.isin(network_branches.index)]])
@@ -707,7 +861,7 @@ def Network_Setup(period, input_panel):
     # PyPSA generator data: name, bus, p_nom, p_nom_extendable, carrier, marginal_cost, capital_cost.
     input_panel["generation"]["p_nom_extendable"] = False
     input_panel["generation"]["p_nom"] = input_panel["generation"]["p_nom"+str(period)] # Update p_nom for the period
-    input_panel["generation"]["inflow"] = input_panel["generation"]["inflow_nom"+str(period)] * parameters["snapshots"] / 8760 # Update inflow, scaling for the number of snapshots
+    input_panel["generation"]["inflow"] = input_panel["generation"]["inflow_nom"+str(period)] * parameters["snapshots"] / 8760 # Update inflow, scaling for the number of snapshots which may vary during debugging.
     pypsa.io.import_components_from_dataframe(network, input_panel["generation"], "Generator")
 
     # PyPSA generator data: name, bus, p_nom, p_nom_extendable, carrier, marginal_cost, capital_cost.
@@ -725,6 +879,7 @@ def Network_Setup(period, input_panel):
     input_panel["storage"]["p_nom"] =input_panel["storage"]["p_nom"+str(period)]
 
     pypsa.io.import_components_from_dataframe(network, input_panel["storage"], "StorageUnit")
+    #network.storage_units.loc[network.storage_units.efficiency_store>0,'marginal_cost'] = parameters['storage_marginal_cost'] # Add an epsilon cost to storage to avoid simultaneous storage and dispatch of storage units
 
     # PyPSA load data: bus, name
     columns = ["bus"]
@@ -773,6 +928,7 @@ def Network_Update(period, network, network_branches, input_panel):
     network.storage_units.loc[:,"inflow"] = network.storage_units.loc[:,"inflow_nom"+str(period)]
 
 def Time_Series_Update(period, network, input_panel):
+
     """ Updates times series for the current period """
     # PyPSA load time series: snapshots, loads
     demand_series = input_panel["demand_series"] * input_panel["demand"]["p_set"+str(period)].transpose()
@@ -790,7 +946,7 @@ def Load_Parameters(run_name):
 
     global parameters
 
-    parameters_file = os.path.join("Simulations", run_name, "parameters.csv")
+    parameters_file = os.path.join("input", run_name, "parameters.csv")
     with open(parameters_file, mode='r') as file:
         reader = csv.reader(file)
         parameters = {rows[0]: float(rows[1]) if rows[2] == "float" else int(rows[1]) if rows[2] == "int" else rows[1] == "TRUE" if rows[2] == "bool" else rows[1] for rows in reader}
@@ -799,7 +955,7 @@ def Load_Parameters(run_name):
         parameters[parameter] = parameters[parameter].split() # These strings need to be split to list of strings
 
     # For the full hours run all snapshots are equiprobable
-    parameters["snapshots_probability"] = np.array([1 / parameters["snapshots"] * parameters["snapshot_scale"] for sn in range(parameters["snapshots"])])
+    parameters["snapshots_probability"] = np.array([1 / parameters["snapshots"] for sn in range(parameters["snapshots"])])
 
     # Convert the IC_cap string to a list of strings
     parameters["IC_cap"] = [float(cap) for cap in parameters["IC_cap"].split()]
@@ -811,6 +967,14 @@ def Load_Parameters(run_name):
 
     return parameters
 
+def Save_Parameters(parameters):
+    """ Load analysis parameters to initialize run calls.
+        The parameters are sent back to the simulation main function to start the periods iteration.
+    """
+    parameters_file = os.path.join("network", parameters['simulation_name'], "parameters.csv")
+    with open(parameters_file,'wb') as file:
+        writer = csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL)
+        writer.writerow(file)
 
 def Load_Data(run_name):
     """ Load input data for a given run.
@@ -821,14 +985,14 @@ def Load_Data(run_name):
 
     # Treat all input data with single-column indexes.
     for sheet in ["transmission","buses","generation","storage","inflow_series","generation_series","demand_series","branch_parameters","snapshots","extendable_generation","demand"]:
-        input_path = os.path.join("Simulations", run_name, sheet +".csv")
+        input_path = os.path.join("input", run_name, sheet +".csv")
         input_panel[sheet] = pd.read_csv(input_path, index_col=0)
         input_panel[sheet] = input_panel[sheet].loc[input_panel[sheet].index.dropna()]
     input_panel["extendable_generation"]["bus"] = input_panel["extendable_generation"]["bus"].str.lower()
 
     # Treat all input data with double-column indexes.
     for sheet in ["branch_class"]:
-        input_path = os.path.join("Simulations", run_name, sheet +".csv")
+        input_path = os.path.join("input", run_name, sheet +".csv")
         input_panel[sheet] = pd.read_csv(input_path, index_col=[0,1])
         input_panel[sheet] = input_panel[sheet].loc[input_panel[sheet].index.dropna()]
         input_panel[sheet].sort_index()
